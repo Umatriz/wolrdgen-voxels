@@ -10,8 +10,9 @@ use bevy_ecs::{
 use tracing::error;
 use winit::{
     application::ApplicationHandler,
+    dpi::LogicalSize,
     event::WindowEvent,
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::{ControlFlow, EventLoop, OwnedDisplayHandle},
     window::{Window, WindowAttributes},
 };
 
@@ -32,6 +33,9 @@ fn runner(mut app: App, event_loop: EventLoop<()>) -> AppExit {
         app.finish();
         app.cleanup();
     }
+
+    app.world_mut()
+        .insert_resource(WinitOwnedDispayHandle(event_loop.owned_display_handle()));
 
     let mut runner_state = WinitAppRunnerState::new(app);
 
@@ -56,6 +60,9 @@ pub struct AppWindows {
 #[derive(Event)]
 pub struct RawWnitWindowEvent(pub WindowEvent);
 
+#[derive(Resource)]
+pub struct WinitOwnedDispayHandle(pub OwnedDisplayHandle);
+
 struct WinitAppRunnerState {
     app: App,
     app_exit: Option<AppExit>,
@@ -77,7 +84,11 @@ impl WinitAppRunnerState {
 impl ApplicationHandler for WinitAppRunnerState {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let primary_window = event_loop
-            .create_window(WindowAttributes::default())
+            .create_window(
+                WindowAttributes::default()
+                    .with_resizable(false)
+                    .with_inner_size(LogicalSize::new(1280, 720)),
+            )
             .unwrap();
 
         self.app.world_mut().insert_resource(AppWindows {
