@@ -13,3 +13,4 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 winit = { version = "0.30.11", features = ["rwh_06"] }
 raw-window-handle = "0.6.0"
+bytemuck = "1.23.1"

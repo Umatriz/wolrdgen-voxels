@@ -5,7 +5,9 @@ use std::{
 };
 
 use ash::{
-    Device, Entry, Instance, ext, khr,
+    Device, Entry, Instance,
+    ext::{self, separate_stencil_usage},
+    khr,
     vk::{
         self, API_VERSION_1_0, API_VERSION_1_3, DebugReportCallbackEXT, DebugUtilsMessengerEXT,
         Extent2D,
@@ -99,11 +101,26 @@ pub struct VulkanApp {
     swapchain_image_views: Vec<vk::ImageView>,
     swapchain_image_format: vk::Format,
     swapchain_extent: vk::Extent2D,
+
+    render_pass: vk::RenderPass,
+    pipeline_layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
 }
 
 impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
+            self.device.destroy_pipeline(self.pipeline, None);
+
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+
+            self.device.destroy_render_pass(self.render_pass, None);
+
+            for image_view in &self.swapchain_image_views {
+                self.device.destroy_image_view(*image_view, None);
+            }
+
             self.swapchain_device
                 .destroy_swapchain(self.swapchain, None);
 
@@ -160,6 +177,11 @@ impl VulkanApp {
         let swapchain_image_views =
             Self::create_image_views(&device, &swapchain_images, swapchain_image_format);
 
+        let render_pass = Self::create_render_pass(&device, swapchain_image_format);
+
+        let (pipeline, pipeline_layout) =
+            Self::create_graphics_pipeline(&device, swapchain_extent, render_pass);
+
         Self {
             _entry: entry,
             instance,
@@ -176,6 +198,9 @@ impl VulkanApp {
             swapchain_image_views,
             swapchain_image_format,
             swapchain_extent,
+            render_pass,
+            pipeline_layout,
+            pipeline,
         }
     }
 
@@ -624,7 +649,7 @@ impl VulkanApp {
                         .base_mip_level(0)
                         .level_count(1)
                         .base_array_layer(0)
-                        .layer_count(0),
+                        .layer_count(1),
                 );
             let image_view = unsafe { device.create_image_view(&create_info, None).unwrap() };
             image_views.push(image_view);
@@ -633,9 +658,155 @@ impl VulkanApp {
         image_views
     }
 
-    fn create_graphics_pipeline() {
+    fn create_render_pass(device: &Device, swapchain_image_format: vk::Format) -> vk::RenderPass {
+        let color_attachment = vk::AttachmentDescription::default()
+            .format(swapchain_image_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+
+        let color_attachment_ref = vk::AttachmentReference::default()
+            .attachment(0)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+
+        let color_attachments = &[color_attachment_ref];
+        let subpass = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(color_attachments);
+
+        let attachments = &[color_attachment];
+        let subpasses = &[subpass];
+        let render_pass_create_info = vk::RenderPassCreateInfo::default()
+            .attachments(attachments)
+            .subpasses(subpasses);
+
+        unsafe {
+            device
+                .create_render_pass(&render_pass_create_info, None)
+                .unwrap()
+        }
+    }
+
+    fn create_graphics_pipeline(
+        device: &Device,
+        swapchain_extent: Extent2D,
+        render_pass: vk::RenderPass,
+    ) -> (vk::Pipeline, vk::PipelineLayout) {
         let vertex = include_bytes!("../../shaders/out/triangle.vert.spv");
         let fragment = include_bytes!("../../shaders/out/triangle.frag.spv");
+
+        let vertex_shader_module = Self::create_shader_module(device, vertex);
+        let fragment_shader_module = Self::create_shader_module(device, fragment);
+
+        let vertex_stage_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vertex_shader_module)
+            .name(c"main");
+        let fragment_stage_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fragment_shader_module)
+            .name(c"main");
+        let shader_stages = &[vertex_stage_info, fragment_stage_info];
+
+        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_attribute_descriptions(&[])
+            .vertex_binding_descriptions(&[]);
+
+        let input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        let viewport = vk::Viewport::default()
+            .x(0.0)
+            .y(0.0)
+            .width(swapchain_extent.width as f32)
+            .height(swapchain_extent.height as f32)
+            .min_depth(0.0)
+            .max_depth(1.0);
+
+        let scissor = vk::Rect2D::default()
+            .offset(vk::Offset2D::default().x(0).y(0))
+            .extent(swapchain_extent);
+
+        let dynamic_states = &[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state_create_info =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(dynamic_states);
+
+        let viewport_state_create_info = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+
+        let rasterizer_create_info = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::BACK)
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .depth_bias_enable(false);
+
+        let multisampling_create_info = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1)
+            .min_sample_shading(1.0);
+
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(
+                vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+            )
+            .blend_enable(false);
+
+        let attachments = &[color_blend_attachment];
+        let color_blending_create_info = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .logic_op(vk::LogicOp::COPY)
+            .attachments(attachments);
+
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default();
+
+        let pipeline_layout = unsafe {
+            device
+                .create_pipeline_layout(&pipeline_layout_create_info, None)
+                .unwrap()
+        };
+
+        let pipeline_create_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(shader_stages)
+            .vertex_input_state(&vertex_input_create_info)
+            .input_assembly_state(&input_assembly_create_info)
+            .viewport_state(&viewport_state_create_info)
+            .rasterization_state(&rasterizer_create_info)
+            .multisample_state(&multisampling_create_info)
+            .color_blend_state(&color_blending_create_info)
+            .dynamic_state(&dynamic_state_create_info)
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0);
+
+        let pipeline = unsafe {
+            device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_create_info], None)
+                .unwrap()[0]
+        };
+
+        unsafe {
+            device.destroy_shader_module(vertex_shader_module, None);
+            device.destroy_shader_module(fragment_shader_module, None);
+        }
+
+        (pipeline, pipeline_layout)
+    }
+
+    fn create_shader_module(device: &Device, buf: &[u8]) -> vk::ShaderModule {
+        let create_info = vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(buf));
+        unsafe { device.create_shader_module(&create_info, None).unwrap() }
     }
 }
 
