@@ -10,7 +10,7 @@ use ash::{
     khr,
     vk::{
         self, API_VERSION_1_0, API_VERSION_1_3, DebugReportCallbackEXT, DebugUtilsMessengerEXT,
-        Extent2D,
+        Extent2D, SwapchainDisplayNativeHdrCreateInfoAMD,
     },
 };
 use bevy_app::{Last, MainScheduleOrder, Plugin, Startup};
@@ -37,6 +37,8 @@ impl Plugin for RenderingPlugin {
         order.insert_after(Last, Render);
 
         app.add_systems(Startup, init_vulkan_app);
+
+        app.add_systems(Render, render_frame);
     }
 }
 
@@ -90,7 +92,7 @@ pub struct VulkanApp {
     surface: vk::SurfaceKHR,
 
     physical_device: vk::PhysicalDevice,
-    device: Device,
+    pub device: Device,
 
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
@@ -105,11 +107,33 @@ pub struct VulkanApp {
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+
+    swapchain_framebuffers: Vec<vk::Framebuffer>,
+
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+
+    image_available_semaphore: vk::Semaphore,
+    render_finished_semaphore: vk::Semaphore,
+    frame_rendering_fence: vk::Fence,
 }
 
 impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
+            self.device
+                .destroy_semaphore(self.image_available_semaphore, None);
+            self.device
+                .destroy_semaphore(self.render_finished_semaphore, None);
+
+            self.device.destroy_fence(self.frame_rendering_fence, None);
+
+            self.device.destroy_command_pool(self.command_pool, None);
+
+            for framebuffer in &self.swapchain_framebuffers {
+                self.device.destroy_framebuffer(*framebuffer, None);
+            }
+
             self.device.destroy_pipeline(self.pipeline, None);
 
             self.device
@@ -182,6 +206,19 @@ impl VulkanApp {
         let (pipeline, pipeline_layout) =
             Self::create_graphics_pipeline(&device, swapchain_extent, render_pass);
 
+        let swapchain_framebuffers = Self::create_framebuffers(
+            &device,
+            render_pass,
+            &swapchain_image_views,
+            swapchain_extent,
+        );
+
+        let command_pool = Self::create_command_pool(&device, queue_family_indices);
+        let command_buffer = Self::create_command_buffer(&device, command_pool);
+
+        let (image_available_semaphore, render_finished_semaphore, frame_rendering_fence) =
+            Self::create_sync_objects(&device);
+
         Self {
             _entry: entry,
             instance,
@@ -201,6 +238,12 @@ impl VulkanApp {
             render_pass,
             pipeline_layout,
             pipeline,
+            swapchain_framebuffers,
+            command_pool,
+            command_buffer,
+            image_available_semaphore,
+            render_finished_semaphore,
+            frame_rendering_fence,
         }
     }
 
@@ -678,11 +721,21 @@ impl VulkanApp {
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(color_attachments);
 
+        let dependency = vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+
         let attachments = &[color_attachment];
         let subpasses = &[subpass];
+        let dependencies = &[dependency];
         let render_pass_create_info = vk::RenderPassCreateInfo::default()
             .attachments(attachments)
-            .subpasses(subpasses);
+            .subpasses(subpasses)
+            .dependencies(dependencies);
 
         unsafe {
             device
@@ -808,6 +861,199 @@ impl VulkanApp {
         let create_info = vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(buf));
         unsafe { device.create_shader_module(&create_info, None).unwrap() }
     }
+
+    fn create_framebuffers(
+        device: &Device,
+        render_pass: vk::RenderPass,
+        swapchain_image_views: &[vk::ImageView],
+        swapchain_extent: Extent2D,
+    ) -> Vec<vk::Framebuffer> {
+        let mut swapchain_framebuffers = Vec::with_capacity(swapchain_image_views.len());
+
+        for image_view in swapchain_image_views {
+            let attachments = &[*image_view];
+
+            let framebuffer_create_info = vk::FramebufferCreateInfo::default()
+                .render_pass(render_pass)
+                .attachments(attachments)
+                .width(swapchain_extent.width)
+                .height(swapchain_extent.height)
+                .layers(1);
+
+            let framebuffer = unsafe {
+                device
+                    .create_framebuffer(&framebuffer_create_info, None)
+                    .unwrap()
+            };
+
+            swapchain_framebuffers.push(framebuffer);
+        }
+
+        swapchain_framebuffers
+    }
+
+    fn create_command_pool(
+        device: &Device,
+        queue_family_indices: QueueFamilyIndices,
+    ) -> vk::CommandPool {
+        let command_pool_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .queue_family_index(queue_family_indices.graphics_family);
+
+        unsafe {
+            device
+                .create_command_pool(&command_pool_info, None)
+                .unwrap()
+        }
+    }
+
+    fn create_command_buffer(device: &Device, command_pool: vk::CommandPool) -> vk::CommandBuffer {
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+
+        unsafe { device.allocate_command_buffers(&allocate_info).unwrap()[0] }
+    }
+
+    fn record_command_buffer(
+        device: &Device,
+        command_buffer: vk::CommandBuffer,
+        render_pass: vk::RenderPass,
+        swapchain_framebuffers: &[vk::Framebuffer],
+        image_index: usize,
+        swapchain_extent: Extent2D,
+        graphics_pipeline: vk::Pipeline,
+    ) {
+        let begin_info = vk::CommandBufferBeginInfo::default();
+
+        unsafe {
+            device.begin_command_buffer(command_buffer, &begin_info);
+
+            let render_pass_info = vk::RenderPassBeginInfo::default()
+                .render_pass(render_pass)
+                .framebuffer(swapchain_framebuffers[image_index])
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: swapchain_extent,
+                })
+                .clear_values(&[vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 1.0],
+                    },
+                }]);
+
+            device.cmd_begin_render_pass(
+                command_buffer,
+                &render_pass_info,
+                vk::SubpassContents::INLINE,
+            );
+
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                graphics_pipeline,
+            );
+
+            let viewport = vk::Viewport::default()
+                .x(0.0)
+                .y(0.0)
+                .width(swapchain_extent.width as f32)
+                .height(swapchain_extent.height as f32)
+                .min_depth(0.0)
+                .max_depth(1.0);
+            device.cmd_set_viewport(command_buffer, 0, &[viewport]);
+
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: swapchain_extent,
+            };
+            device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+
+            device.cmd_draw(command_buffer, 3, 1, 0, 0);
+
+            device.cmd_end_render_pass(command_buffer);
+
+            device.end_command_buffer(command_buffer)
+        };
+    }
+
+    fn create_sync_objects(device: &Device) -> (vk::Semaphore, vk::Semaphore, vk::Fence) {
+        let semaphore_info = vk::SemaphoreCreateInfo::default();
+
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        unsafe {
+            (
+                device.create_semaphore(&semaphore_info, None).unwrap(),
+                device.create_semaphore(&semaphore_info, None).unwrap(),
+                device.create_fence(&fence_info, None).unwrap(),
+            )
+        }
+    }
+
+    fn draw_frame(&self) {
+        unsafe {
+            self.device
+                .wait_for_fences(&[self.frame_rendering_fence], true, u64::MAX)
+                .unwrap();
+
+            self.device
+                .reset_fences(&[self.frame_rendering_fence])
+                .unwrap();
+
+            let (image_index, _) = self
+                .swapchain_device
+                .acquire_next_image(
+                    self.swapchain,
+                    u64::MAX,
+                    self.image_available_semaphore,
+                    vk::Fence::null(),
+                )
+                .unwrap();
+
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .unwrap();
+
+            Self::record_command_buffer(
+                &self.device,
+                self.command_buffer,
+                self.render_pass,
+                &self.swapchain_framebuffers,
+                image_index as usize,
+                self.swapchain_extent,
+                self.pipeline,
+            );
+
+            let wait_semaphores = &[self.image_available_semaphore];
+            let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let command_buffers = &[self.command_buffer];
+            let signal_semaphores = &[self.render_finished_semaphore];
+
+            let submit_info = vk::SubmitInfo::default()
+                .wait_semaphores(wait_semaphores)
+                .wait_dst_stage_mask(wait_stages)
+                .command_buffers(command_buffers)
+                .signal_semaphores(signal_semaphores);
+
+            self.device.queue_submit(
+                self.graphics_queue,
+                &[submit_info],
+                self.frame_rendering_fence,
+            );
+
+            let swapchains = &[self.swapchain];
+            let image_indices = &[image_index];
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(signal_semaphores)
+                .swapchains(swapchains)
+                .image_indices(image_indices);
+
+            self.swapchain_device
+                .queue_present(self.present_queue, &present_info)
+                .unwrap();
+        };
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -835,4 +1081,8 @@ fn init_vulkan_app(
 
     let vulkan_app = VulkanApp::new(create_info);
     commands.insert_resource(vulkan_app);
+}
+
+fn render_frame(vulkan_app: Res<VulkanApp>) {
+    vulkan_app.draw_frame();
 }
