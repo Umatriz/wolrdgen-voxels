@@ -16,6 +16,8 @@ use winit::{
     window::{Window, WindowAttributes},
 };
 
+use crate::rendering::VulkanApp;
+
 pub struct WindowingPlugin;
 
 impl Plugin for WindowingPlugin {
@@ -42,6 +44,12 @@ fn runner(mut app: App, event_loop: EventLoop<()>) -> AppExit {
     if let Err(err) = event_loop.run_app(&mut runner_state) {
         error!("winit event loop returned an error: {err}");
     };
+
+    // TODO: Use dedicated resource for `Device`
+    let vulkan_app = runner_state.app.world_mut().resource::<VulkanApp>();
+    unsafe { vulkan_app.device.device_wait_idle().unwrap() };
+
+    runner_state.app.world_mut().clear_all();
 
     runner_state.app_exit.unwrap_or_else(|| {
         error!("Failed to receive an app exit code! This is a bug");
@@ -119,8 +127,5 @@ impl ApplicationHandler for WinitAppRunnerState {
         }
     }
 
-    fn exiting(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let world = self.app.world_mut();
-        world.clear_all();
-    }
+    fn exiting(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {}
 }
