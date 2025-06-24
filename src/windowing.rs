@@ -13,7 +13,7 @@ use winit::{
     dpi::LogicalSize,
     event::WindowEvent,
     event_loop::{ControlFlow, EventLoop, OwnedDisplayHandle},
-    window::{Window, WindowAttributes},
+    window::{Window, WindowAttributes, WindowId},
 };
 
 use crate::rendering::VulkanApp;
@@ -35,6 +35,8 @@ fn runner(mut app: App, event_loop: EventLoop<()>) -> AppExit {
         app.finish();
         app.cleanup();
     }
+
+    app.add_event::<RawWnitWindowEvent>();
 
     app.world_mut()
         .insert_resource(WinitOwnedDispayHandle(event_loop.owned_display_handle()));
@@ -66,7 +68,10 @@ pub struct AppWindows {
 }
 
 #[derive(Event)]
-pub struct RawWnitWindowEvent(pub WindowEvent);
+pub struct RawWnitWindowEvent {
+    pub event: WindowEvent,
+    pub window_id: WindowId,
+}
 
 #[derive(Resource)]
 pub struct WinitOwnedDispayHandle(pub OwnedDisplayHandle);
@@ -94,7 +99,7 @@ impl ApplicationHandler for WinitAppRunnerState {
         let primary_window = event_loop
             .create_window(
                 WindowAttributes::default()
-                    .with_resizable(false)
+                    .with_resizable(true)
                     .with_inner_size(LogicalSize::new(1280, 720)),
             )
             .unwrap();
@@ -122,7 +127,9 @@ impl ApplicationHandler for WinitAppRunnerState {
                 self.app.update();
             }
             event => {
-                self.app.world_mut().send_event(RawWnitWindowEvent(event));
+                self.app
+                    .world_mut()
+                    .send_event(RawWnitWindowEvent { event, window_id });
             }
         }
     }
