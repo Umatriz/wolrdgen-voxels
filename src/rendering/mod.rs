@@ -592,9 +592,9 @@ impl VulkanApp {
         window: &Window,
     ) -> vk::Extent2D {
         if capabilities.current_extent.width != u32::MAX {
-            capabilities.current_extent
+            dbg!(capabilities.current_extent)
         } else {
-            let size = window.inner_size();
+            let size = dbg!(window.inner_size());
 
             let width = size.width.clamp(
                 capabilities.min_image_extent.width,
@@ -1137,6 +1137,7 @@ impl VulkanApp {
             for framebuffer in &self.swapchain_framebuffers {
                 self.device.destroy_framebuffer(*framebuffer, None);
             }
+
             for image_view in &self.swapchain_image_views {
                 self.device.destroy_image_view(*image_view, None);
             }
@@ -1178,13 +1179,36 @@ fn render_frame(
     mut vulkan_app: ResMut<VulkanApp>,
     windows: Res<AppWindows>,
     mut raw_winit_events: EventReader<RawWnitWindowEvent>,
+    mut maximization_state: Local<Option<bool>>,
 ) {
     let primary_window = &windows.primary;
     let was_resized = raw_winit_events
         .read()
         .any(|RawWnitWindowEvent { event, window_id }| {
-            matches!(event, WindowEvent::Resized(..)) && *window_id == primary_window.id()
+            let is_resize =
+                matches!(event, WindowEvent::Resized(..)) && *window_id == primary_window.id();
+            if is_resize {
+                info!(event = ?event);
+            }
+            is_resize
         });
+
+    // let is_minimized = primary_window.is_minimized();
+    let is_maximized = primary_window.is_maximized();
+
+    let was_maximized = match *maximization_state {
+        Some(previous_state) => previous_state ^ is_maximized,
+        None => is_maximized,
+    };
+    *maximization_state = Some(is_maximized);
+
+    if was_maximized {
+        info!("Maximized");
+    }
+
+    if was_resized {
+        info!("Resized");
+    }
 
     vulkan_app.draw_frame(&windows.primary, was_resized);
 }
