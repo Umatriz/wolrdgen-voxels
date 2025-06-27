@@ -19,6 +19,7 @@ use itertools::Itertools;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use tracing::{debug, error, info, info_span, trace, warn};
 use winit::{
+    dpi::PhysicalSize,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, OwnedDisplayHandle},
     window::Window,
@@ -27,6 +28,8 @@ use winit::{
 use crate::windowing::{AppWindows, RawWnitWindowEvent, WinitOwnedDispayHandle};
 
 mod triangle;
+
+mod storage;
 
 pub struct RenderingPlugin;
 
@@ -194,7 +197,7 @@ impl VulkanApp {
                 physical_device,
                 &surface_instance,
                 surface,
-                &create_info.window,
+                create_info.window.inner_size(),
                 queue_family_indices,
             );
         let swapchain_images = unsafe { swapchain_device.get_swapchain_images(swapchain).unwrap() };
@@ -589,13 +592,11 @@ impl VulkanApp {
 
     fn choose_swapchain_extent(
         capabilities: vk::SurfaceCapabilitiesKHR,
-        window: &Window,
+        size: PhysicalSize<u32>,
     ) -> vk::Extent2D {
         if capabilities.current_extent.width != u32::MAX {
             dbg!(capabilities.current_extent)
         } else {
-            let size = dbg!(window.inner_size());
-
             let width = size.width.clamp(
                 capabilities.min_image_extent.width,
                 capabilities.max_image_extent.width,
@@ -615,7 +616,7 @@ impl VulkanApp {
         physical_device: vk::PhysicalDevice,
         surface_instance: &khr::surface::Instance,
         surface: vk::SurfaceKHR,
-        window: &Window,
+        size: PhysicalSize<u32>,
         queue_family_indices: QueueFamilyIndices,
     ) -> (
         khr::swapchain::Device,
@@ -628,7 +629,7 @@ impl VulkanApp {
 
         let surface_format = Self::choose_swapchain_surface_format(&swapchain_support.formats);
         let present_mode = Self::choose_swapchain_present_mode(&swapchain_support.present_modes);
-        let extent = Self::choose_swapchain_extent(swapchain_support.capabilities, window);
+        let extent = Self::choose_swapchain_extent(swapchain_support.capabilities, size);
 
         let mut image_count = swapchain_support.capabilities.min_image_count + 1;
         if swapchain_support.capabilities.max_image_count > 0
@@ -1003,24 +1004,31 @@ impl VulkanApp {
         objects.into_iter().multiunzip()
     }
 
-    fn draw_frame(&mut self, window: &Window, was_resized: bool) {
+    // TODO: Replace bool with custom error type
+    fn draw_frame(&mut self, swapchain_ok: &mut bool) {
         unsafe {
             self.device
                 .wait_for_fences(&[self.in_flight_fences[self.current_frame]], true, u64::MAX)
                 .unwrap();
 
-            let image_index = match self.swapchain_device.acquire_next_image(
-                self.swapchain,
-                u64::MAX,
-                self.image_available_semaphores[self.current_frame],
-                vk::Fence::null(),
-            ) {
-                Ok((index, _)) => index,
-                Err(err) if err == vk::Result::ERROR_OUT_OF_DATE_KHR => {
-                    self.recreate_swapchain(window);
-                    return;
+            // FIXME: nesting
+            let image_index = if *swapchain_ok {
+                match self.swapchain_device.acquire_next_image(
+                    self.swapchain,
+                    u64::MAX,
+                    self.image_available_semaphores[self.current_frame],
+                    vk::Fence::null(),
+                ) {
+                    Ok((index, _)) => index,
+                    Err(err) if err == vk::Result::ERROR_OUT_OF_DATE_KHR => {
+                        // self.recreate_swapchain(window);
+                        *swapchain_ok = false;
+                        return;
+                    }
+                    Err(err) => panic!("{}", err),
                 }
-                Err(err) => panic!("{}", err),
+            } else {
+                return;
             };
 
             self.device
@@ -1072,13 +1080,15 @@ impl VulkanApp {
                 .swapchain_device
                 .queue_present(self.present_queue, &present_info)
             {
-                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.recreate_swapchain(window);
+                /* Ok(true) | */
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    // self.recreate_swapchain(window);
+                    *swapchain_ok = false;
                 }
-                Err(_) | Ok(_) if was_resized => {
-                    self.recreate_swapchain(window);
-                }
-                Ok(false) => {}
+                // Err(_) | Ok(_) if was_resized => {
+                //     self.recreate_swapchain(window);
+                // }
+                Ok(_) => {}
                 Err(_) => panic!("Failed to present swapchain image"),
             };
         };
@@ -1109,7 +1119,7 @@ impl VulkanApp {
                 self.physical_device,
                 &self.surface_instance,
                 self.surface,
-                window,
+                window.inner_size(),
                 queue_family_indices,
             );
 
@@ -1146,6 +1156,57 @@ impl VulkanApp {
                 .destroy_swapchain(self.swapchain, None);
         }
     }
+
+    fn resize(&mut self, swapchain_ok: &mut bool, size: PhysicalSize<u32>) {
+        unsafe {
+            self.device.device_wait_idle();
+
+            let old_swapchain = self.swapchain;
+
+            self.cleanup_swapchain();
+
+            let queue_family_indices = Self::find_queue_families(
+                &self.instance,
+                self.physical_device,
+                &self.surface_instance,
+                self.surface,
+            )
+            .unwrap();
+
+            let (swapchain_device, swapchain, swapchain_image_format, swapchain_extent) =
+                Self::create_swapchain(
+                    &self.instance,
+                    &self.device,
+                    self.physical_device,
+                    &self.surface_instance,
+                    self.surface,
+                    size,
+                    queue_family_indices,
+                );
+
+            let swapchain_images = swapchain_device.get_swapchain_images(swapchain).unwrap();
+            let swapchain_image_views =
+                Self::create_image_views(&self.device, &swapchain_images, swapchain_image_format);
+
+            let swapchain_framebuffers = Self::create_framebuffers(
+                &self.device,
+                self.render_pass,
+                &swapchain_image_views,
+                swapchain_extent,
+            );
+
+            self.swapchain_device = swapchain_device;
+            self.swapchain = swapchain;
+            self.swapchain_extent = swapchain_extent;
+            self.swapchain_images = swapchain_images;
+            self.swapchain_image_views = swapchain_image_views;
+            self.swapchain_framebuffers = swapchain_framebuffers;
+
+            *swapchain_ok = true;
+
+            self.draw_frame(swapchain_ok);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1180,22 +1241,31 @@ fn render_frame(
     windows: Res<AppWindows>,
     mut raw_winit_events: EventReader<RawWnitWindowEvent>,
     mut maximization_state: Local<Option<bool>>,
+    mut swapchain_ok: Local<Option<bool>>,
 ) {
+    let swapchain_ok = swapchain_ok.get_or_insert(true);
+
     let primary_window = &windows.primary;
-    let was_resized = raw_winit_events
-        .read()
-        .any(|RawWnitWindowEvent { event, window_id }| {
-            let is_resize =
-                matches!(event, WindowEvent::Resized(..)) && *window_id == primary_window.id();
-            if is_resize {
-                info!(event = ?event);
-            }
-            is_resize
-        });
+    // let was_resized = raw_winit_events
+    //     .read()
+    //     .any(|RawWnitWindowEvent { event, window_id }| {
+    //         let is_resize =
+    //             matches!(event, WindowEvent::Resized(..)) && *window_id == primary_window.id();
+    //         if is_resize {
+    //             info!(event = ?event);
+    //         }
+    //         is_resize
+    //     });
 
-    // let is_minimized = primary_window.is_minimized();
+    for event in raw_winit_events.read() {
+        let WindowEvent::Resized(size) = event.event else {
+            continue;
+        };
+
+        vulkan_app.resize(swapchain_ok, size);
+    }
+
     let is_maximized = primary_window.is_maximized();
-
     let was_maximized = match *maximization_state {
         Some(previous_state) => previous_state ^ is_maximized,
         None => is_maximized,
@@ -1206,9 +1276,5 @@ fn render_frame(
         info!("Maximized");
     }
 
-    if was_resized {
-        info!("Resized");
-    }
-
-    vulkan_app.draw_frame(&windows.primary, was_resized);
+    vulkan_app.draw_frame(swapchain_ok);
 }
