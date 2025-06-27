@@ -9,6 +9,7 @@ use winit::{
 use crate::{rendering::RenderingPlugin, windowing::WindowingPlugin};
 
 mod rendering;
+pub mod utils;
 mod windowing;
 
 fn main() {

@@ -25,6 +25,7 @@ use winit::{
     window::Window,
 };
 
+use crate::utils::FirstRun;
 use crate::windowing::{AppWindows, RawWnitWindowEvent, WinitOwnedDispayHandle};
 
 mod triangle;
@@ -1242,6 +1243,7 @@ fn render_frame(
     mut raw_winit_events: EventReader<RawWnitWindowEvent>,
     mut maximization_state: Local<Option<bool>>,
     mut swapchain_ok: Local<Option<bool>>,
+    mut first_run: FirstRun,
 ) {
     let swapchain_ok = swapchain_ok.get_or_insert(true);
 
@@ -1257,12 +1259,14 @@ fn render_frame(
     //         is_resize
     //     });
 
-    for event in raw_winit_events.read() {
-        let WindowEvent::Resized(size) = event.event else {
-            continue;
-        };
+    if !first_run.is_first_run() {
+        for event in raw_winit_events.read() {
+            let WindowEvent::Resized(size) = event.event else {
+                continue;
+            };
 
-        vulkan_app.resize(swapchain_ok, size);
+            vulkan_app.resize(swapchain_ok, size);
+        }
     }
 
     let is_maximized = primary_window.is_maximized();
