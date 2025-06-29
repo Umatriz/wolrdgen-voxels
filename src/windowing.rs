@@ -39,7 +39,7 @@ fn runner(mut app: App, event_loop: EventLoop<()>) -> AppExit {
     app.add_event::<RawWnitWindowEvent>();
 
     app.world_mut()
-        .insert_resource(WinitOwnedDispayHandle(event_loop.owned_display_handle()));
+        .insert_resource(WinitOwnedDisplayHandle(event_loop.owned_display_handle()));
 
     let mut runner_state = WinitAppRunnerState::new(app);
 
@@ -49,6 +49,7 @@ fn runner(mut app: App, event_loop: EventLoop<()>) -> AppExit {
 
     // TODO: Use dedicated resource for `Device`
     let vulkan_app = runner_state.app.world_mut().resource::<VulkanApp>();
+    // TODO: Move it to the custom implementation of the clear for the `Storage` plugin
     unsafe { vulkan_app.device.device_wait_idle().unwrap() };
 
     runner_state.app.world_mut().clear_all();
@@ -74,7 +75,7 @@ pub struct RawWnitWindowEvent {
 }
 
 #[derive(Resource)]
-pub struct WinitOwnedDispayHandle(pub OwnedDisplayHandle);
+pub struct WinitOwnedDisplayHandle(pub OwnedDisplayHandle);
 
 struct WinitAppRunnerState {
     app: App,

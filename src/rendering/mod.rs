@@ -26,11 +26,10 @@ use winit::{
 };
 
 use crate::utils::FirstRun;
-use crate::windowing::{AppWindows, RawWnitWindowEvent, WinitOwnedDispayHandle};
-
-mod triangle;
+use crate::windowing::{AppWindows, RawWnitWindowEvent, WinitOwnedDisplayHandle};
 
 mod storage;
+mod triangle;
 
 pub struct RenderingPlugin;
 
@@ -1226,7 +1225,7 @@ struct SwapchainSupportDetails {
 fn init_vulkan_app(
     mut commands: Commands,
     windows: Res<AppWindows>,
-    display_handle: Res<WinitOwnedDispayHandle>,
+    display_handle: Res<WinitOwnedDisplayHandle>,
 ) {
     let create_info = VulkanAppCreateInfo {
         display_handle: display_handle.0.clone(),
