@@ -8,6 +8,7 @@ use winit::{
 
 use crate::{rendering::RenderingPlugin, windowing::WindowingPlugin};
 
+pub mod dense_storage;
 mod rendering;
 pub mod utils;
 mod windowing;
