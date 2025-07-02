@@ -3,8 +3,8 @@ use bevy_app::Plugin;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 
 use super::{
-    Destroy, Destroyable, Single, Storage, StoragesAppExt, destroy_storage,
-    destroy_storage_handled, optional,
+    Destroy, Destroyable, Storage, StoragesAppExt, destroy_storage, destroy_storage_handled,
+    optional,
 };
 
 pub struct CommonStoragesPlugin;
@@ -70,7 +70,7 @@ impl Destroyable for DebugUtilsPack {
     }
 }
 
-pub type DeviceStorage<'w> = Storage<'w, Single<ash::Device>>;
+pub type DeviceStorage<'w> = Storage<'w, ash::Device>;
 impl Destroyable for ash::Device {
     type Params<'w, 's> = ();
 

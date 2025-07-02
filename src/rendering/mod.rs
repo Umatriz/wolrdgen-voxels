@@ -26,6 +26,7 @@ use winit::{
     dpi::PhysicalSize,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, OwnedDisplayHandle},
+    window::Window,
 };
 
 use crate::utils::FirstRun;
