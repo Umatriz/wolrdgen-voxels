@@ -8,7 +8,8 @@ pub struct Index {
     generation: u32,
 }
 
-struct IndexAllocator {
+#[derive(Default)]
+pub struct IndexAllocator {
     next_index: AtomicU32,
     // TODO: Use channel instead if mutable access will cause problems
     recycle_queue: VecDeque<Index>,
@@ -16,7 +17,7 @@ struct IndexAllocator {
 }
 
 impl IndexAllocator {
-    fn reserve(&mut self) -> Index {
+    pub fn reserve(&mut self) -> Index {
         if let Some(mut recycled) = self.recycle_queue.pop_front() {
             recycled.generation += 1;
             self.recycled.push(recycled);
@@ -31,7 +32,7 @@ impl IndexAllocator {
         }
     }
 
-    fn recycle(&mut self, index: Index) {
+    pub fn recycle(&mut self, index: Index) {
         self.recycle_queue.push_back(index);
     }
 }
@@ -41,6 +42,7 @@ struct Entry<T> {
     generation: u32,
 }
 
+#[derive(Default)]
 pub struct DenseStorage<T> {
     buffer: Vec<Entry<T>>,
     len: u32,
@@ -54,8 +56,16 @@ impl<T> DenseStorage<T> {
     }
 
     /// Returns `true` if there's no items stored.
-    pub fn is_emty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    pub fn buffer_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub fn index_allocator_mut(&mut self) -> &mut IndexAllocator {
+        &mut self.index_allocator
     }
 
     pub fn insert(&mut self, index: Index, value: T) -> Result<bool, InvalidGenerationError> {
@@ -74,6 +84,43 @@ impl<T> DenseStorage<T> {
                 index,
                 current_generation: entry.generation,
             })
+        }
+    }
+
+    /// Remove item from storage and queues index to be recycled.
+    pub fn remove_recycle(&mut self, index: Index) -> Option<T> {
+        self.remove(index)
+            .inspect(|_| self.index_allocator.recycle(index))
+    }
+
+    /// Removes item from storage.
+    ///
+    /// **This method does not queue the index to be recycled.**
+    pub fn remove(&mut self, index: Index) -> Option<T> {
+        self.flush();
+        let entry = &mut self.buffer[index.index as usize];
+        if entry.generation == index.generation {
+            entry.value.take().inspect(|_| self.len -= 1)
+        } else {
+            None
+        }
+    }
+
+    pub fn get(&self, index: Index) -> Option<&T> {
+        let entry = self.buffer.get(index.index as usize)?;
+        if entry.generation == index.generation {
+            entry.value.as_ref()
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mut(&mut self, index: Index) -> Option<&mut T> {
+        let entry = self.buffer.get_mut(index.index as usize)?;
+        if entry.generation == index.generation {
+            entry.value.as_mut()
+        } else {
+            None
         }
     }
 
@@ -103,4 +150,47 @@ impl<T> DenseStorage<T> {
 pub struct InvalidGenerationError {
     index: Index,
     current_generation: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_test() {
+        let mut storage = DenseStorage::<i32>::default();
+
+        let a = storage.index_allocator_mut().reserve();
+        assert!(!storage.insert(a, 1).unwrap());
+
+        let b = storage.index_allocator_mut().reserve();
+        assert!(!storage.insert(b, 2).unwrap());
+
+        let c = storage.index_allocator_mut().reserve();
+        assert!(!storage.insert(c, 3).unwrap());
+
+        assert_eq!(storage.get(a), Some(&1));
+        assert_eq!(storage.get(b), Some(&2));
+        assert_eq!(storage.get(c), Some(&3));
+
+        assert_eq!(storage.buffer_len(), 3);
+
+        storage.remove_recycle(a);
+        storage.remove_recycle(b);
+
+        let d = storage.index_allocator_mut().reserve();
+        assert!(!storage.insert(d, 4).unwrap());
+
+        let e = storage.index_allocator_mut().reserve();
+        assert!(!storage.insert(e, 4).unwrap());
+        assert!(storage.insert(e, 7).unwrap());
+
+        assert_eq!(storage.get(d), Some(&4));
+        assert_eq!(storage.get(e), Some(&7));
+
+        assert!(storage.get(a).is_none());
+        assert!(storage.insert(a, 8).is_err());
+
+        assert_eq!(storage.buffer_len(), 3);
+    }
 }
